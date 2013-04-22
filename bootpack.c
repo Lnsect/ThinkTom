@@ -5,13 +5,6 @@ void make_window8(unsigned char *buf ,int xsize ,int ysize ,char *title);
 void putfonts8_asc_sht(struct SHEET *sht, int x,int y,int c,int b,char *s,int l);
 void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c);
 
-struct TSS32{
-	int backlink, esp0, ss0, esp1, ss1, esp2, ss2, cr3;//与任务设置相关的信息
-	int eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;//32位寄存器
-	int es, cs, ss, ds, fs, gs;//16位寄存器
-	int ldtr, iomap;//与任务设置相关的信息
-};
-
 void task_b_main(struct SHEET *sht_back);
 
 void make_window8(unsigned char *buf, int xsize, int ysize, char *title)
@@ -104,7 +97,7 @@ void HariMain(void)
 	init_gdtidt();
 	init_pic();
 	io_sti();		// IDT/PIC的初始化已经完成，于是开放CPU的中断
-	fifo32_init(&fifo, 128, fifobuf);
+	fifo32_init(&fifo, 128, fifobuf, 0);
 	init_pit();
 	init_keyboard(&fifo, 256);
 	enable_mouse(&fifo, 512, &mdec);
@@ -157,36 +150,20 @@ void HariMain(void)
 	putfonts8_asc_sht(sht_back, 0, 32, COL8_FFFFFF, COL8_008484, s, 40);
 
 //多任务：
-	int task_b_esp;
-	struct TSS32 tss_a, tss_b;
-	struct SEGMENT_DESCRIPTOR *gdt = (struct SEGMENT_DESCRIPTOR *) ADR_GDT;
-
-	tss_a.ldtr = 0;
-	tss_a.iomap = 0x40000000;
-	tss_b.ldtr = 0;
-	tss_b.iomap = 0x40000000;
-	set_segmdesc(gdt + 3, 103, (int) &tss_a, AR_TSS32);
-	set_segmdesc(gdt + 4, 103, (int) &tss_b, AR_TSS32);
-	load_tr(3 * 8);
-	task_b_esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024;
-	tss_b.eip = (int) &task_b_main;
-	tss_b.eflags = 0x00000202; /* IF = 1; */
-	tss_b.eax = 0;
-	tss_b.ecx = 0;
-	tss_b.edx = 0;
-	tss_b.ebx = 0;
-	tss_b.esp = task_b_esp;
-	tss_b.ebp = 0;
-	tss_b.esi = 0;
-	tss_b.edi = 0;
-	tss_b.es = 1 * 8;
-	tss_b.cs = 2 * 8;
-	tss_b.ss = 1 * 8;
-	tss_b.ds = 1 * 8;
-	tss_b.fs = 1 * 8;
-	tss_b.gs = 1 * 8;
-	*((int *) (task_b_esp + 4)) = (int) sht_back;
-	mt_init();
+	struct TASK *task_a,*task_b;
+	task_a = task_init(memman);
+	fifo.task = task_a;
+	task_b = task_alloc();
+	task_b->tss.esp = memman_alloc_4k(memman, 64 * 1024) + 64 * 1024 - 8;
+	task_b->tss.eip = (int) &task_b_main;
+	task_b->tss.es = 1 * 8;
+	task_b->tss.cs = 2 * 8;
+	task_b->tss.ss = 1 * 8;
+	task_b->tss.ds = 1 * 8;
+	task_b->tss.fs = 1 * 8;
+	task_b->tss.gs = 1 * 8;
+	*((int *) (task_b->tss.esp + 4)) = (int) sht_back;
+	task_run(task_b);
 
 	for (;;) {
 		io_cli();
@@ -292,7 +269,7 @@ void task_b_main(struct SHEET *sht_back)
 	int i, fifobuf[128], count = 0, count0 = 0;
 	char s[12];
 
-	fifo32_init(&fifo, 128, fifobuf);
+	fifo32_init(&fifo, 128, fifobuf, 0);
 	timer_put = timer_alloc();
 	timer_init(timer_put, &fifo, 1);
 	timer_settime(timer_put, 1);
