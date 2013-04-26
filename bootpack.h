@@ -186,8 +186,10 @@ void timer_settime(struct TIMER *timer, unsigned int timeout);
 void inthandler20(int *esp);
 
 /* mtask.c */
-#define MAX_TASKS	1000	//最大任务数量
-#define TASK_GDT0	3		//定义从GDT的几号开始分配给TSS
+#define MAX_TASKS		1000	//最大任务数量
+#define TASK_GDT0		3		//定义从GDT的几号开始分配给TSS
+#define MAX_TASKS_LV	100
+#define MAX_TASKLEVELS	10
 struct TSS32{
 	int backlink, esp0, ss0, esp1, ss1, esp2, ss2, cr3;//与任务设置相关的信息
 	int eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;//32位寄存器
@@ -196,17 +198,23 @@ struct TSS32{
 };
 struct TASK {
 	int sel, flags; //sel存放GDT的编号
+	int level, priority;
 	struct TSS32 tss;
 };
-struct TASKCTL {
+struct TASKLEVEL {
 	int running;	//正在运行的任务数量
 	int now; 		//当前运行的任务
-	struct TASK *tasks[MAX_TASKS];
+	struct TASK *tasks[MAX_TASKS_LV];
+};
+struct TASKCTL {
+	int now_lv;	//当前活动的LEVEL
+	char lv_change;	//在下次任务切换时是否需要改变LEVEL
+	struct TASKLEVEL level[MAX_TASKLEVELS];
 	struct TASK tasks0[MAX_TASKS];
 };
 extern struct TIMER *task_timer;
 struct TASK *task_init(struct MEMMAN *memman);
 struct TASK *task_alloc(void);
-void task_run(struct TASK *task);
+void task_run(struct TASK *task, int level, int priority);
 void task_switch(void);
 void task_sleep(struct TASK *task);
