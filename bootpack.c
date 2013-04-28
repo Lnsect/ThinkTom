@@ -24,6 +24,8 @@ void make_textbox8(struct SHEET *sht, int x0, int y0, int sx, int sy, int c);
 void make_wtitle8(unsigned char *buf, int xsize, char *title, char act);
 void console_task(struct SHEET *sheet, unsigned int memtotal);
 int cons_newline(int cursor_y, struct SHEET *sheet);
+void file_readfat(int *fat, unsigned char *img);
+void file_loadfile(int clustno, int size, char *buf, int *fat, char *img);
 
 void putfonts8_asc_sht(struct SHEET *sht, int x,int y,int c,int b,char *s,int l)
 /*
@@ -406,14 +408,17 @@ void console_task(struct SHEET *sheet, unsigned int memtotal)
 	int i, fifobuf[128];
 	int cursor_x = 16, cursor_y = 28, cursor_c = -1;
 	char s[30], cmdline[30];
+	char *p;
 	struct MEMMAN *memman = (struct MEMMAN *) MEMMAN_ADDR;
 	int x, y;
 	struct FILEINFO *finfo = (struct FILEINFO *) (ADR_DISKIMG + 0x002600);
+	int *fat = (int *) memman_alloc_4k(memman, 4 * 2880);
 
 	fifo32_init(&task->fifo, 128, fifobuf, task);
 	timer = timer_alloc();
 	timer_init(timer, &task->fifo, 1);
 	timer_settime(timer, 50);
+	file_readfat(fat, (unsigned char *) (ADR_DISKIMG + 0x000200));
 
 	//显示提示符
 	putfonts8_asc_sht(sheet, 8, 28, COL8_FFFFFF, COL8_000000, ">", 1);
@@ -497,6 +502,83 @@ void console_task(struct SHEET *sheet, unsigned int memtotal)
 							}
 						}
 						cursor_y = cons_newline(cursor_y, sheet);
+					} else if (strncmp(cmdline, "type ", 5) == 0) {
+						// type、cat 命令
+						// 准备文件名
+						for (y = 0; y < 11; y++){
+							s[y] = ' ';
+						}
+						y = 0;
+						for (x = 5; y < 11 && cmdline[x] != 0; x++) {
+							if (cmdline[x] == '.' && y <=8) {
+								y = 8;
+							} else {
+								s[y] = cmdline[x];
+								if ('a' <= s[y] && s[y] <= 'z') {
+									//小写字母转换成大写字母
+									s[y] -= 0x20;
+								}
+								y++;
+							}
+						}
+						//寻找文件
+						for (x = 0; x < 224; ) {
+							if (finfo[x].name[0] == 0x00){
+								break;
+							}
+							if ((finfo[x].type & 0x18) == 0) {
+								for (y = 0;y < 11; y++){
+									if (finfo[x].name[y] != s[y]){
+										goto type_next_file;
+									}
+								}
+								break;	// 找到文件
+							}
+type_next_file:
+							x++;
+						}
+						if (x < 224 && finfo[x].name[0] != 0x00) {
+							//找到文件后的处理
+							p = (char *) memman_alloc_4k(memman, finfo[x].size);
+							file_loadfile(finfo[x].clustno, finfo[x].size, p, fat, (char *)(ADR_DISKIMG + 0x003e00));
+							cursor_x = 8;
+							for (y = 0; y < finfo[x].size; y++) {
+								//逐字输出
+								s[0] = p[y];
+								s[1] = 0;
+								if (s[0] == 0x09) {	//制表符
+									for(;;){
+										putfonts8_asc_sht(sheet, cursor_x, cursor_y, COL8_FFFFFF, COL8_000000, " ", 1);
+										cursor_x += 8;
+										if(cursor_x == 8 + 240){
+											cursor_x = 8;
+											cursor_y = cons_newline(cursor_y, sheet);
+										}
+										if(((cursor_x - 8) & 0x1f) == 0){
+											break;	//被32整除则break；
+										}
+									}
+								} else if (s[0] == 0x0a){	//换行
+									cursor_x = 8;
+									cursor_y = cons_newline(cursor_y, sheet);
+								} else if (s[0] == 0x0d){	//回车
+									//不做任何处理
+								} else {
+									putfonts8_asc_sht(sheet, cursor_x, cursor_y, COL8_FFFFFF, COL8_000000, s, 1);
+									cursor_x += 8;
+									if (cursor_x == 8 + 240) {
+										cursor_x = 8;
+										cursor_y = cons_newline(cursor_y, sheet);
+									}
+								}
+							}
+							memman_free_4k(memman, (int) p, finfo[x].size);
+						} else {
+							//没有找到文件的处理
+							putfonts8_asc_sht(sheet, 8, cursor_y, COL8_FFFFFF, COL8_000000, "File not found.", 15);
+							cursor_y = cons_newline(cursor_y, sheet);
+						}
+						cursor_y = cons_newline(cursor_y, sheet);
 					} else if (cmdline[0] != 0) {
 						//不是命令，也不是空行
 						putfonts8_asc_sht(sheet, 8, cursor_y, COL8_FFFFFF, COL8_000000, "Bad command.",12);
@@ -543,4 +625,36 @@ int cons_newline(int cursor_y, struct SHEET *sheet)
 		sheet_refresh(sheet, 8, 28, 8 + 240, 28 + 128);
 	}
 	return cursor_y;
+}
+
+void file_readfat(int *fat, unsigned char *img)
+//将磁盘映像中的FAT解压缩
+{
+	int i, j = 0;
+	for (i = 0; i < 2880; i += 2) {
+		fat[i + 0] = (img[j + 0]      | img[j + 1] << 8) & 0xfff;
+		fat[i + 1] = (img[j + 1] >> 4 | img[j + 2] << 4) & 0xfff;
+		j += 3;
+	}
+	return;
+}
+
+void file_loadfile(int clustno, int size, char *buf, int *fat, char *img)
+{
+	int i;
+	for (;;) {
+		if (size <= 512) {
+			for (i = 0; i < size; i++) {
+				buf[i] = img[clustno * 512 + i];
+			}
+			break;
+		}
+		for (i = 0; i < 512; i++) {
+			buf[i] = img[clustno * 512 + i];
+		}
+		size -= 512;
+		buf += 512;
+		clustno = fat[clustno];
+	}
+	return;
 }
